@@ -253,6 +253,19 @@ def test_preview_lex_failure_raises_scanner_error():
     assert (exc.value.line, exc.value.column) == (1, 7)
 
 
+def test_preview_unterminated_quote_raises_unterminated_statement():
+    # a source ending in an unclosed single/double quote surfaces as an
+    # unterminated statement positioned where the scan stopped (end of
+    # source), not as an unexpected character at the quote
+    for quote in ("'", '"'):
+        src = f"x = {quote}"
+        with pytest.raises(IdentifierLexError) as exc:
+            preview_collision_fix(src, "x")
+        assert exc.value.error == "unterminated_statement"
+        assert exc.value.offset == len(src) == 5
+        assert (exc.value.line, exc.value.column) == (1, 6)
+
+
 # --------------------------------------------------------------- API: POST -
 
 def test_post_fix_preview_200_shape(client):
@@ -321,6 +334,22 @@ def test_post_fix_preview_unterminated_string_422(client):
     assert resp.json()["detail"]["error"] == "unterminated_string"
 
 
+def test_post_fix_preview_unterminated_quote_422(client):
+    # source ends with an unclosed single quote: 3.11 reports the quote
+    # as an ERRORTOKEN; the API must answer unterminated_statement with
+    # the position where the scan stopped, not unexpected_character
+    resp = client.post(
+        "/api/v1/identifiers/normalization/fix-preview",
+        json={"source": "x = '", "normalised_name": "x"},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "unterminated_statement"
+    assert detail["offset"] == 5
+    assert detail["line"] == 1 and detail["column"] == 6
+    assert "message" in detail
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -349,6 +378,10 @@ def test_post_fix_preview_writes_nothing(client):
     client.post(
         "/api/v1/identifiers/normalization/fix-preview",
         json={"source": "x = 1 $\n", "normalised_name": "x"},
+    )
+    client.post(
+        "/api/v1/identifiers/normalization/fix-preview",
+        json={"source": "x = '", "normalised_name": "x"},
     )
     client.post(
         "/api/v1/identifiers/normalization/fix-preview",

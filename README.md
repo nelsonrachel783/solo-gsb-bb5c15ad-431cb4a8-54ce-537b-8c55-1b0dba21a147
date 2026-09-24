@@ -479,9 +479,9 @@ curl -s http://localhost:8000/api/v1/identifiers/normalization/1 | jq
 
 | `detail.error` | 条件 |
 |---|---|
-| `unexpected_character` | 源码中存在 Python 词法不接受的字符（如 `$`、NUL、未依附标识符的游离组合记号） |
+| `unexpected_character` | 源码中存在 Python 词法不接受的字符（如 `$`、NUL、未依附标识符的游离组合记号），定位到该字符本身 |
 | `unterminated_string` | 多行字符串（三引号等）未终止 |
-| `unterminated_statement` | 源码在括号/显式续行等多行语句中途结束 |
+| `unterminated_statement` | 源码在括号/显式续行等多行语句中途结束，或以未闭合的单/双引号字符串结束（如 `x = '`；3.11 词法器先把引号报为 ERRORTOKEN，此处归类为未终止语句并定位到扫描停止处，即源码末尾） |
 | `indentation_error` | 缩进不一致（Tab/空格混用、unindent 不匹配等） |
 
 ```json

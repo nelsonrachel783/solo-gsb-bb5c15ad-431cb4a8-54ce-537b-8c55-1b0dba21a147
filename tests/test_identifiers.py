@@ -218,7 +218,8 @@ def test_empty_and_comment_only_source():
         ("x = 1 $\n", "unexpected_character"),
         ("x\x00y = 1\n", "unexpected_character"),
         ("x = '''unterminated\n", "unterminated_string"),
-        ('x = "abc\n', "unexpected_character"),
+        ("x = '", "unterminated_statement"),
+        ('x = "abc\n', "unterminated_statement"),
         ("x = 1\\\n", "unterminated_statement"),
         ("x = (\n", "unterminated_statement"),
         ("def f():\n  x=1\n y=2\n", "indentation_error"),
@@ -241,6 +242,31 @@ def test_unexpected_character_position():
     assert (exc.value.line, exc.value.column) == (1, 7)
     assert exc.value.offset == 6
     assert "U+0024" in exc.value.message
+
+
+def test_unterminated_quote_position_is_where_scan_stopped():
+    # A source ending in an unclosed single/double quote is reported by
+    # the 3.11 tokenizer as an ERRORTOKEN for the quote; it must surface
+    # as an unterminated statement positioned where the scan stopped
+    # (end of source), not as an unexpected character at the quote.
+    for quote in ("'", '"'):
+        src = f"x = {quote}"
+        with pytest.raises(IdentifierLexError) as exc:
+            scan_identifiers(src)
+        assert exc.value.error == "unterminated_statement"
+        assert exc.value.offset == len(src) == 5
+        assert (exc.value.line, exc.value.column) == (1, 6)
+
+
+def test_unterminated_quote_mid_line_still_reports_scan_stop():
+    # the unclosed quote is not at the very end, but the scan still
+    # stops at the end of the source
+    src = 'x = "abc\n'
+    with pytest.raises(IdentifierLexError) as exc:
+        scan_identifiers(src)
+    assert exc.value.error == "unterminated_statement"
+    assert exc.value.offset == len(src)
+    assert (exc.value.line, exc.value.column) == (2, 1)
 
 
 def test_indentation_error_position():
@@ -325,6 +351,25 @@ def test_post_unterminated_string_422(client):
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["error"] == "unterminated_string"
+
+
+def test_post_unterminated_quote_422_position_and_no_write(client):
+    resp = client.post(
+        "/api/v1/identifiers/normalization", json={"source": "x = '"}
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "unterminated_statement"
+    assert detail["offset"] == 5
+    assert detail["line"] == 1 and detail["column"] == 6
+    assert "message" in detail
+
+    # the lexical failure persisted nothing: next report still gets id 1
+    ok = client.post(
+        "/api/v1/identifiers/normalization", json={"source": "y = 1\n"}
+    )
+    assert ok.status_code == 201
+    assert ok.json()["id"] == 1
 
 
 def test_post_indentation_error_422(client):

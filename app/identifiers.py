@@ -16,11 +16,15 @@ offset and 1-based line/column in the original source; collisions and the
 occurrences inside them are ordered by source position, so the output is
 stable.
 
-Any lexical failure (an unlexable character, an unterminated multi-line
-string/statement, inconsistent indentation ...) raises
+Any lexical failure (an unlexable character, an unterminated string
+literal or statement, inconsistent indentation ...) raises
 :class:`IdentifierLexError` carrying the original-source position before
 any report is produced, so a rejected source never produces an audit
-result.
+result.  Note that the 3.11 tokenizer reports a single/double quote that
+opens an unterminated string literal as an ``ERRORTOKEN`` for the quote
+itself (3.12+ raises ``TokenError`` instead); that case is classified as
+``unterminated_statement`` positioned where the scan stopped (the end of
+the source), not as an ``unexpected_character`` at the quote.
 
 A collision *fix preview* (:func:`preview_collision_fix`) reuses this same
 scan to locate one collision group by its NFKC normalised name and rewrites
@@ -45,6 +49,11 @@ from typing import Optional
 # A leading BOM is legal at the very start of a UTF-8 source file; the
 # tokenizer (which works on decoded text) treats one elsewhere as an error.
 _BOM = "﻿"
+
+# Quote characters that open a string literal.  The 3.11 tokenizer emits
+# one of these as an ERRORTOKEN when the literal it opens is never closed
+# on its line (an unterminated string), instead of raising TokenError.
+_QUOTE_CHARS = "'\""
 
 
 class IdentifierLexError(ValueError):
@@ -299,6 +308,28 @@ def scan_identifiers(source: str) -> NormalizationReport:
             error="unexpected_character",
         )
 
+    def unterminated_string(tok: "tokenize.TokenInfo") -> None:
+        # The 3.11 tokenizer emits the quote that opens an unterminated
+        # string literal as an ERRORTOKEN and keeps scanning; the failure
+        # is an unterminated statement, not an unexpected character.
+        # Report the position where the scan stopped: the end of the
+        # source (the scanner consumed everything looking for the
+        # closing quote), consistent with the other unterminated
+        # constructs.
+        start_line, start_col = tok.start
+        ch = tok.string[0]
+        eof_line = len(line_starts) - 1
+        eof_col = len(source) - line_starts[eof_line]
+        raise IdentifierLexError(
+            f"unterminated string literal: {ch!r} (U+{ord(ch):04X}) at "
+            f"line {start_line}, column {raw_column(start_line, start_col)} "
+            "is never closed; scan stopped at end of source",
+            offset=raw_offset(eof_line, eof_col),
+            line=eof_line,
+            column=raw_column(eof_line, eof_col),
+            error="unterminated_statement",
+        )
+
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type == tokenize.NAME:
@@ -318,6 +349,10 @@ def scan_identifiers(source: str) -> NormalizationReport:
                 ):
                     continue
                 if not tok.string.isspace():
+                    if tok.string[0] in _QUOTE_CHARS:
+                        # A quote ERRORTOKEN is a string literal that was
+                        # never closed; the quote itself is legal.
+                        unterminated_string(tok)
                     # Whitespace ERRORTOKENs are benign noise; anything
                     # else is an unlexable character (a stray combining
                     # mark not attached to a name included).
