@@ -218,7 +218,9 @@ def test_empty_and_comment_only_source():
         ("x = 1 $\n", "unexpected_character"),
         ("x\x00y = 1\n", "unexpected_character"),
         ("x = '''unterminated\n", "unterminated_string"),
-        ('x = "abc\n', "unexpected_character"),
+        ("x = '", "unterminated_statement"),
+        ('x = "', "unterminated_statement"),
+        ('x = "abc\n', "unterminated_statement"),
         ("x = 1\\\n", "unterminated_statement"),
         ("x = (\n", "unterminated_statement"),
         ("def f():\n  x=1\n y=2\n", "indentation_error"),
@@ -241,6 +243,36 @@ def test_unexpected_character_position():
     assert (exc.value.line, exc.value.column) == (1, 7)
     assert exc.value.offset == 6
     assert "U+0024" in exc.value.message
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_unterminated_quote_at_eof_position(quote):
+    # The 3.11 tokenizer reports the opening quote as an ERRORTOKEN; the
+    # failure must be positioned where the string scan stopped (end of
+    # source here), not at the quote.
+    src = f"x = {quote}"
+    with pytest.raises(IdentifierLexError) as exc:
+        scan_identifiers(src)
+    assert exc.value.error == "unterminated_statement"
+    assert (exc.value.offset, exc.value.line, exc.value.column) == (5, 1, 6)
+
+
+def test_unterminated_quote_position_is_line_end_not_quote():
+    # The string scan stops at the line break: 'x = "abc' is 8 codepoints,
+    # so the stop position is the newline at offset 8 (line 1, column 9).
+    with pytest.raises(IdentifierLexError) as exc:
+        scan_identifiers('x = "abc\n')
+    assert exc.value.error == "unterminated_statement"
+    assert (exc.value.offset, exc.value.line, exc.value.column) == (8, 1, 9)
+
+
+def test_unterminated_quote_position_on_later_line_with_bom():
+    src = f"{BOM}a = 1\nb = '"
+    with pytest.raises(IdentifierLexError) as exc:
+        scan_identifiers(src)
+    assert exc.value.error == "unterminated_statement"
+    # end of source: BOM + "a = 1\nb = '" is 12 codepoints
+    assert (exc.value.offset, exc.value.line, exc.value.column) == (12, 2, 6)
 
 
 def test_indentation_error_position():
@@ -325,6 +357,25 @@ def test_post_unterminated_string_422(client):
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["error"] == "unterminated_string"
+
+
+def test_post_unterminated_quote_422_with_stop_position_and_no_audit(client):
+    resp = client.post(
+        "/api/v1/identifiers/normalization", json={"source": "x = '"}
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "unterminated_statement"
+    assert detail["offset"] == 5
+    assert detail["line"] == 1 and detail["column"] == 6
+    assert "message" in detail
+
+    # the lexical failure wrote nothing: a later success still gets id 1
+    ok = client.post(
+        "/api/v1/identifiers/normalization", json={"source": "y = 1\n"}
+    )
+    assert ok.status_code == 201
+    assert ok.json()["id"] == 1
 
 
 def test_post_indentation_error_422(client):

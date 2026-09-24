@@ -16,11 +16,14 @@ offset and 1-based line/column in the original source; collisions and the
 occurrences inside them are ordered by source position, so the output is
 stable.
 
-Any lexical failure (an unlexable character, an unterminated multi-line
-string/statement, inconsistent indentation ...) raises
+Any lexical failure (an unlexable character, an unterminated string or
+statement, inconsistent indentation ...) raises
 :class:`IdentifierLexError` carrying the original-source position before
 any report is produced, so a rejected source never produces an audit
-result.
+result.  A string opened by a single/double quote that is never closed
+on its line is reported as ``unterminated_statement`` positioned where
+the string scan stopped (the line break or end of source), not as an
+unexpected character at the quote.
 
 A collision *fix preview* (:func:`preview_collision_fix`) reuses this same
 scan to locate one collision group by its NFKC normalised name and rewrites
@@ -45,6 +48,12 @@ from typing import Optional
 # A leading BOM is legal at the very start of a UTF-8 source file; the
 # tokenizer (which works on decoded text) treats one elsewhere as an error.
 _BOM = "﻿"
+
+# Characters that open a string literal.  The 3.11 tokenizer emits a lone
+# quote as an ERRORTOKEN when the string it opens is never closed on its
+# line, so such a token marks an unterminated statement rather than an
+# unlexable character.
+_QUOTES = "'\""
 
 
 class IdentifierLexError(ValueError):
@@ -299,6 +308,28 @@ def scan_identifiers(source: str) -> NormalizationReport:
             error="unexpected_character",
         )
 
+    def unterminated_string(tok: "tokenize.TokenInfo") -> None:
+        start_line, start_col = tok.start
+        ch = tok.string[0]
+        # A lone quote ERRORTOKEN is the opening quote of a string the
+        # tokenizer could not close: single/double-quoted strings cannot
+        # cross a line break, so the string scan stops at the next line
+        # break, or at end of source when the line itself is unterminated.
+        # Report that stop position (on the quote's own line), not the
+        # quote itself.
+        stop = stripped_offset(start_line, start_col)
+        while stop < len(source) and source[stop] not in "\r\n":
+            stop += 1
+        stop_col = stop - line_starts[start_line]
+        raise IdentifierLexError(
+            f"unterminated string literal: opening quote {ch!r} at "
+            f"line {start_line}, column {start_col + 1} is never closed",
+            offset=stop + bom_offset,
+            line=start_line,
+            column=raw_column(start_line, stop_col),
+            error="unterminated_statement",
+        )
+
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type == tokenize.NAME:
@@ -318,6 +349,11 @@ def scan_identifiers(source: str) -> NormalizationReport:
                 ):
                     continue
                 if not tok.string.isspace():
+                    # A lone quote is the opening quote of a string that
+                    # is never closed on its line: an unterminated
+                    # statement, not an unlexable character.
+                    if tok.string[0] in _QUOTES:
+                        unterminated_string(tok)
                     # Whitespace ERRORTOKENs are benign noise; anything
                     # else is an unlexable character (a stray combining
                     # mark not attached to a name included).

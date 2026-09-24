@@ -253,6 +253,17 @@ def test_preview_lex_failure_raises_scanner_error():
     assert (exc.value.line, exc.value.column) == (1, 7)
 
 
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_preview_unterminated_quote_raises_unterminated_statement(quote):
+    # the preview reuses the normalization scan: a source ending in an
+    # unterminated quote is not an unexpected character at the quote but
+    # an unterminated statement positioned where the string scan stopped
+    with pytest.raises(IdentifierLexError) as exc:
+        preview_collision_fix(f"x = {quote}", "x")
+    assert exc.value.error == "unterminated_statement"
+    assert (exc.value.offset, exc.value.line, exc.value.column) == (5, 1, 6)
+
+
 # --------------------------------------------------------------- API: POST -
 
 def test_post_fix_preview_200_shape(client):
@@ -319,6 +330,33 @@ def test_post_fix_preview_unterminated_string_422(client):
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["error"] == "unterminated_string"
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_post_fix_preview_unterminated_quote_422(client, quote):
+    resp = client.post(
+        "/api/v1/identifiers/normalization/fix-preview",
+        json={"source": f"x = {quote}", "normalised_name": "x"},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "unterminated_statement"
+    assert detail["offset"] == 5
+    assert detail["line"] == 1 and detail["column"] == 6
+    assert "message" in detail
+
+
+def test_post_fix_preview_unterminated_quote_writes_nothing(client):
+    client.post(
+        "/api/v1/identifiers/normalization/fix-preview",
+        json={"source": "x = '", "normalised_name": "x"},
+    )
+    stored = client.post(
+        "/api/v1/identifiers/normalization", json={"source": "y = 1\n"}
+    )
+    assert stored.status_code == 201
+    assert stored.json()["id"] == 1
+    assert client.get("/api/v1/audits").json()["total"] == 0
 
 
 @pytest.mark.parametrize(
